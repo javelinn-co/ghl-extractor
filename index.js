@@ -1,64 +1,103 @@
-// index.js (extractor)
 const fs = require('fs');
 const path = require('path');
 const axios = require('axios');
+const puppeteer = require('puppeteer');
 const prompt = require('prompt-sync')();
 
 const TOKEN_PATH = '/data/token.txt';
 const PROFILE    = '/data/browser-profile';
+const PROGRESS   = '/data/progress.json';
+const RAW_DIR    = '/data/raw';
 
-async function loadToken() {
-  if (!fs.existsSync(TOKEN_PATH)) {
-    console.error('❌ No token found—run the token-fetcher first.');
-    process.exit(1);
+async function refreshToken() {
+  console.log('🔄 Refreshing token via headless Chrome…');
+  fs.mkdirSync(PROFILE, { recursive: true });
+  const browser = await puppeteer.launch({
+    headless: true,
+    args: ['--no-sandbox','--disable-setuid-sandbox'],
+    userDataDir: PROFILE
+  });
+  const page = await browser.newPage();
+  await page.goto('https://app.gohighlevel.com/login', { waitUntil: 'networkidle2' });
+
+  if (await page.$('input[name="email"]')) {
+    console.log('➡️ Complete OTP in the opened browser to persist session.');
+    await page.waitForNavigation({ waitUntil: 'networkidle2' });
   }
-  return fs.readFileSync(TOKEN_PATH, 'utf8').trim();
+
+  const token = await page.evaluate(() => window.getToken && getToken());
+  if (!token) throw new Error('getToken() failed');
+
+  fs.writeFileSync(TOKEN_PATH, token, 'utf8');
+  console.log('✅ Token refreshed.');
+  await browser.close();
+}
+
+async function safeGet(url) {
+  let token;
+  try {
+    token = fs.readFileSync(TOKEN_PATH, 'utf8').trim();
+  } catch {
+    console.log('🔑 No token found, refreshing now...');
+    await refreshToken();
+    token = fs.readFileSync(TOKEN_PATH, 'utf8').trim();
+  }
+
+  let res = await axios.get(url, { headers: { Authorization: `Bearer ${token}` } })
+    .catch(e => e.response || { status: 500, data: e.message });
+
+  if (res.status === 401) {
+    await refreshToken();
+    token = fs.readFileSync(TOKEN_PATH, 'utf8').trim();
+    console.log('🔁 Retrying request with new token…');
+    res = await axios.get(url, { headers: { Authorization: `Bearer ${token}` } })
+      .catch(e => e.response || { status: 500, data: e.message });
+  }
+
+  return res;
 }
 
 (async () => {
-  let token = await loadToken();
-  const progressFile = '/data/progress.json';
-  const rawDir       = '/data/raw';
+  fs.mkdirSync(RAW_DIR, { recursive: true });
+  let progress = { page: 1 };
 
-  fs.mkdirSync(rawDir, { recursive: true });
-  let progress = fs.existsSync(progressFile)
-    ? JSON.parse(fs.readFileSync(progressFile))
-    : { page: 1, index: 0 };
+  if (fs.existsSync(PROGRESS)) {
+    progress = JSON.parse(fs.readFileSync(PROGRESS, 'utf8'));
+  }
 
-  // Example: fetch contact summary pages
   while (true) {
     try {
-      const res = await axios.get(
-        `https://rest.gohighlevel.com/v2/contacts?page=${progress.page}&limit=100`,
-        { headers: { Authorization: `Bearer ${token}` } }
-      );
+      const url = `https://rest.gohighlevel.com/v2/contacts?page=${progress.page}&limit=100`;
+      const res = await safeGet(url);
 
-      if (res.status === 401) {
-        console.log('🔑 Token expired—please wait for the next token-fetcher run.');
-        process.exit(0);
+      const contacts = res.data.contacts || [];
+      if (contacts.length === 0) {
+        console.log('🎉 No more contacts to fetch.');
+        break;
       }
-      if (res.data.contacts.length === 0) break;
 
-      // save raw page
       fs.writeFileSync(
-        path.join(rawDir, `contacts-page-${progress.page}.json`),
+        path.join(RAW_DIR, `contacts-page-${progress.page}.json`),
         JSON.stringify(res.data, null, 2)
       );
-      console.log(`✅ Saved page ${progress.page}`);
+      console.log(`✅ Saved contacts-page-${progress.page}.json (${contacts.length} contacts)`);
 
-      // advance page
       progress.page++;
-      fs.writeFileSync(progressFile, JSON.stringify(progress));
+      fs.writeFileSync(PROGRESS, JSON.stringify(progress, null, 2));
+
+      // Optionally, add a short delay between pages to be gentle
+      await new Promise(r => setTimeout(r, 500));
+
     } catch (e) {
       if (e.response && e.response.status === 429) {
         console.log('⚠️ Rate limited—waiting 10s...');
         await new Promise(r => setTimeout(r, 10000));
       } else {
-        console.error('❌ Unhandled error:', e.message);
+        console.error('❌ Fatal error:', e.message);
         process.exit(1);
       }
     }
   }
 
-  console.log('🎉 All pages fetched.');
+  console.log('✅ Extraction complete.');
 })();
