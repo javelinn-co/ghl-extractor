@@ -1,1 +1,31 @@
+# Dockerfile.token-fetcher
+FROM ubuntu:22.04
 
+# system deps for Chrome
+RUN apt-get update && apt-get install -y \
+    wget gnupg ca-certificates fontconfig libgtk-3-0 libx11-xcb1 libxcomposite1 libxcursor1 \
+    libxdamage1 libxrandr2 libxss1 libxtst6 libnss3 libasound2 libpangocairo-1.0-0 libpango-1.0-0 \
+    libatk1.0-0 libcups2 libdbus-1-3 libdrm2 libxkbcommon0 libgbm1 libexpat1 libxshmfence1 \
+  && rm -rf /var/lib/apt/lists/*
+
+# install Chrome
+RUN wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | apt-key add - \
+ && echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" \
+    > /etc/apt/sources.list.d/google-chrome.list \
+ && apt-get update \
+ && apt-get install -y google-chrome-stable \
+ && rm -rf /var/lib/apt/lists/*
+
+# Node.js
+RUN apt-get update && apt-get install -y curl \
+ && curl -fsSL https://deb.nodesource.com/setup_18.x | bash - \
+ && apt-get install -y nodejs \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm install
+
+COPY token-fetcher.js ./
+
+CMD ["node", "token-fetcher.js"]
